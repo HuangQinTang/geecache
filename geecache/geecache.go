@@ -2,6 +2,7 @@ package geecache
 
 import (
 	"fmt"
+	"geecache/singleflight"
 	"log"
 	"sync"
 )
@@ -27,10 +28,11 @@ func (f GetterFunc) Get(key string) ([]byte, error) {
 
 // Group 缓存命名空间，可以为不同数据创建不同的命名空间
 type Group struct {
-	name      string     //命名空间名
-	getter    Getter     //缓存未命中时执行的回调，用户根据数据源编写回调逻辑
-	mainCache cache      //管理缓存的实例
-	peers     PeerPicker //节点选择器，选择key在哈希环中应该映射的节点
+	name      string              //命名空间名
+	getter    Getter              //缓存未命中时执行的回调，用户根据数据源编写回调逻辑
+	mainCache cache               //管理缓存的实例
+	peers     PeerPicker          //节点选择器，选择key在哈希环中应该映射的节点
+	loader    *singleflight.Group //防止缓存穿透、击穿
 }
 
 // NewGroup 构造 Group
@@ -45,6 +47,7 @@ func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 		name:      name,
 		getter:    getter,
 		mainCache: cache{cacheBytes: cacheBytes},
+		loader:    &singleflight.Group{},
 	}
 	groups[name] = g
 	return g
@@ -82,7 +85,8 @@ func (g *Group) Get(key string) (ByteView, error) {
 
 // load 加载缓存
 func (g *Group) load(key string) (value ByteView, err error) {
-	//判断该key是否是远程节点
+	// g.loader.Do 确保同个key同时只有1个请求，防止缓存穿透、击穿，保护远端服务 //todo 我觉得并发性太差了，屏蔽，移到120行只保护本地没有数据源时
+	//viewi, err := g.loader.Do(key, func() (interface{}, error) {
 	if g.peers != nil {
 		// PickPeer 会根据传入的key hash计算选择拿到对应远程节点http客户端
 		if peer, ok := g.peers.PickPeer(key); ok {
@@ -92,9 +96,14 @@ func (g *Group) load(key string) (value ByteView, err error) {
 			log.Println("[GeeCache] Failed to get from peer", err)
 		}
 	}
-
 	//该key hash后属于自己
 	return g.getLocally(key)
+	//})
+
+	//if err == nil {
+	//	return viewi.(ByteView), nil
+	//}
+	//return
 }
 
 // getFromPeer 用传入的http客户端，获取key
@@ -106,16 +115,22 @@ func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
 	return ByteView{b: bytes}, nil
 }
 
-// getLocally 通过 Group.getter 加载缓存并放入缓存实例中管理
+// getLocally 通过 Group.getter 回调加载缓存并放入缓存实例中管理
 func (g *Group) getLocally(key string) (ByteView, error) {
-	bytes, err := g.getter.Get(key)
+	// 确保同个key同时只有1个请求，防止同时大量缓存穿透、击穿
+	viewi, err := g.loader.Do(key, func() (interface{}, error) {
+		bytes, err := g.getter.Get(key)
+		if err != nil {
+			return ByteView{}, err
+		}
+		value := ByteView{b: cloneBytes(bytes)}
+		g.populateCache(key, value)
+		return value, nil
+	})
 	if err != nil {
 		return ByteView{}, err
-
 	}
-	value := ByteView{b: cloneBytes(bytes)}
-	g.populateCache(key, value)
-	return value, nil
+	return viewi.(ByteView), nil
 }
 
 // populateCache 将kv放入缓存实例
