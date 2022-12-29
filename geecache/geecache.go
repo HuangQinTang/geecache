@@ -2,6 +2,7 @@ package geecache
 
 import (
 	"fmt"
+	pb "geecache/geecachepb"
 	"geecache/singleflight"
 	"log"
 	"sync"
@@ -85,8 +86,6 @@ func (g *Group) Get(key string) (ByteView, error) {
 
 // load 加载缓存
 func (g *Group) load(key string) (value ByteView, err error) {
-	// g.loader.Do 确保同个key同时只有1个请求，防止缓存穿透、击穿，保护远端服务 //todo 我觉得并发性太差了，屏蔽，移到120行只保护本地没有数据源时
-	//viewi, err := g.loader.Do(key, func() (interface{}, error) {
 	if g.peers != nil {
 		// PickPeer 会根据传入的key hash计算选择拿到对应远程节点http客户端
 		if peer, ok := g.peers.PickPeer(key); ok {
@@ -96,23 +95,21 @@ func (g *Group) load(key string) (value ByteView, err error) {
 			log.Println("[GeeCache] Failed to get from peer", err)
 		}
 	}
-	//该key hash后属于自己
 	return g.getLocally(key)
-	//})
-
-	//if err == nil {
-	//	return viewi.(ByteView), nil
-	//}
-	//return
 }
 
 // getFromPeer 用传入的http客户端，获取key
 func (g *Group) getFromPeer(peer PeerGetter, key string) (ByteView, error) {
-	bytes, err := peer.Get(g.name, key)
+	req := &pb.Request{
+		Group: g.name,
+		Key:   key,
+	}
+	res := &pb.Response{}
+	err := peer.Get(req, res)
 	if err != nil {
 		return ByteView{}, err
 	}
-	return ByteView{b: bytes}, nil
+	return ByteView{b: res.Value}, nil
 }
 
 // getLocally 通过 Group.getter 回调加载缓存并放入缓存实例中管理
