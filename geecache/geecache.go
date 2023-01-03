@@ -36,7 +36,10 @@ type Group struct {
 	loader    *singleflight.Group //防止缓存穿透、击穿
 }
 
-// NewGroup 构造 Group
+// NewGroup 构建命名空间，每个命名空间管理一个缓存实例
+// @param name 命名空间名
+// @param cacheBytes 该命名空间缓存上限，单位字节，超过采用lru策略淘汰
+// @param getter 获取数据的回调方法
 func NewGroup(name string, cacheBytes int64, getter Getter) *Group {
 	if getter == nil {
 		panic("nil Getter")
